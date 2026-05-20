@@ -30,9 +30,11 @@ app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-// ── File picker ───────────────────────────────────────────────────────────────
+// ── File picker (v2) ───────────────────────────────────────────────────────────────
 ipcMain.handle('pick-file', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
+  // Make sure window is focused before showing dialog
+  if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
+  const result = await dialog.showOpenDialog({
     title: 'Wybierz plik audio lub wideo',
     filters: [
       { name: 'Audio/Video', extensions: ['mp3','mp4','wav','m4a','ogg','webm','flac','mkv','aac'] },
