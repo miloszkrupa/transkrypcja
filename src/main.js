@@ -1,9 +1,8 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execFile, exec } = require('child_process');
+const { execFile } = require('child_process');
 const https = require('https');
-const http = require('http');
 const os = require('os');
 
 let mainWindow;
@@ -16,6 +15,7 @@ function createWindow() {
     minHeight: 600,
     title: 'Transkrypcja',
     backgroundColor: '#f0efeb',
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -24,17 +24,20 @@ function createWindow() {
   });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+    mainWindow.focus();
+  });
 }
 
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-// ── File picker (v2) ───────────────────────────────────────────────────────────────
+// ── File picker ───────────────────────────────────────────────────────────────
 ipcMain.handle('pick-file', async () => {
-  // Make sure window is focused before showing dialog
-  if (mainWindow) { mainWindow.show(); mainWindow.focus(); }
-  const result = await dialog.showOpenDialog({
+  if (mainWindow) { mainWindow.focus(); }
+  const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Wybierz plik audio lub wideo',
     filters: [
       { name: 'Audio/Video', extensions: ['mp3','mp4','wav','m4a','ogg','webm','flac','mkv','aac'] },
@@ -50,6 +53,7 @@ ipcMain.handle('pick-file', async () => {
 
 // ── Save file dialog ──────────────────────────────────────────────────────────
 ipcMain.handle('save-file', async (e, { defaultName, ext, content }) => {
+  if (mainWindow) { mainWindow.focus(); }
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: defaultName,
     filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
@@ -60,6 +64,7 @@ ipcMain.handle('save-file', async (e, { defaultName, ext, content }) => {
 });
 
 ipcMain.handle('save-binary', async (e, { defaultName, ext, data }) => {
+  if (mainWindow) { mainWindow.focus(); }
   const result = await dialog.showSaveDialog(mainWindow, {
     defaultPath: defaultName,
     filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
@@ -70,24 +75,12 @@ ipcMain.handle('save-binary', async (e, { defaultName, ext, data }) => {
 });
 
 // ── FFmpeg helpers ────────────────────────────────────────────────────────────
-function findFFmpeg() {
+function findBin(name) {
   const candidates = process.platform === 'win32'
-    ? ['ffmpeg.exe', 'C:\\ffmpeg\\bin\\ffmpeg.exe']
-    : ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/usr/bin/ffmpeg', 'ffmpeg'];
+    ? [name + '.exe', 'C:\\ffmpeg\\bin\\' + name + '.exe']
+    : ['/opt/homebrew/bin/' + name, '/usr/local/bin/' + name, '/usr/bin/' + name];
   for (const c of candidates) {
-    try { require('child_process').execSync(`"${c}" -version`, { stdio: 'ignore' }); return c; }
-    catch(e) {}
-  }
-  return null;
-}
-
-function findFFprobe() {
-  const candidates = process.platform === 'win32'
-    ? ['ffprobe.exe', 'C:\\ffmpeg\\bin\\ffprobe.exe']
-    : ['/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe', '/usr/bin/ffprobe', 'ffprobe'];
-  for (const c of candidates) {
-    try { require('child_process').execSync(`"${c}" -version`, { stdio: 'ignore' }); return c; }
-    catch(e) {}
+    try { require('child_process').execSync(`"${c}" -version 2>&1`); return c; } catch(e) {}
   }
   return null;
 }
@@ -104,10 +97,9 @@ ipcMain.handle('transcribe', async (e, { filePath, model, language, apiKey }) =>
       return await transcribeChunk(filePath, model, language, apiKey, 0);
     }
 
-    // Large file — split with FFmpeg
-    const ffmpeg = findFFmpeg();
-    const ffprobe = findFFprobe();
-    if (!ffmpeg) throw new Error('FFmpeg nie znaleziony. Zainstaluj FFmpeg:\nhttps://ffmpeg.org/download.html');
+    const ffmpeg = findBin('ffmpeg');
+    const ffprobe = findBin('ffprobe');
+    if (!ffmpeg) throw new Error('FFmpeg nie znaleziony.\nZainstaluj: brew install ffmpeg');
 
     mainWindow.webContents.send('progress', { pct: 10, msg: 'Analizuję plik...' });
     const duration = await getFileDuration(ffprobe || ffmpeg, filePath);
@@ -119,19 +111,11 @@ ipcMain.handle('transcribe', async (e, { filePath, model, language, apiKey }) =>
     for (let i = 0; i < numChunks; i++) {
       const start = i * chunkSec;
       const chunkPath = path.join(tmpDir, `chunk_${i}.mp3`);
-      const pct1 = 15 + Math.floor(i / numChunks * 35);
-      mainWindow.webContents.send('progress', { pct: pct1, msg: `Konwertowanie ${i+1}/${numChunks}...` });
+      mainWindow.webContents.send('progress', { pct: 15 + Math.floor(i / numChunks * 35), msg: `Konwertowanie ${i+1}/${numChunks}...` });
 
-      await runFFmpeg(ffmpeg, [
-        '-y', '-i', filePath,
-        '-ss', String(start), '-t', String(chunkSec),
-        '-ar', '16000', '-ac', '1',
-        '-c:a', 'libmp3lame', '-q:a', '5',
-        chunkPath
-      ]);
+      await runFFmpeg(ffmpeg, ['-y','-i',filePath,'-ss',String(start),'-t',String(chunkSec),'-ar','16000','-ac','1','-c:a','libmp3lame','-q:a','5',chunkPath]);
 
-      const pct2 = 50 + Math.floor(i / numChunks * 45);
-      mainWindow.webContents.send('progress', { pct: pct2, msg: `Transkrybowanie ${i+1}/${numChunks}...` });
+      mainWindow.webContents.send('progress', { pct: 50 + Math.floor(i / numChunks * 45), msg: `Transkrybowanie ${i+1}/${numChunks}...` });
       const data = await transcribeChunk(chunkPath, model, language, apiKey, start);
 
       allText += (allText ? ' ' : '') + data.text.trim();
@@ -141,7 +125,6 @@ ipcMain.handle('transcribe', async (e, { filePath, model, language, apiKey }) =>
     }
 
     return { text: allText, segments: allSegs, duration: totalDur, language: detectedLang };
-
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -149,10 +132,9 @@ ipcMain.handle('transcribe', async (e, { filePath, model, language, apiKey }) =>
 
 function getFileDuration(ffprobe, filePath) {
   return new Promise((resolve, reject) => {
-    execFile(ffprobe, ['-v','quiet','-print_format','json','-show_format', filePath], (err, stdout) => {
+    execFile(ffprobe, ['-v','quiet','-print_format','json','-show_format',filePath], (err, stdout) => {
       if (err) return reject(err);
-      try { resolve(parseFloat(JSON.parse(stdout).format.duration)); }
-      catch(e) { reject(e); }
+      try { resolve(parseFloat(JSON.parse(stdout).format.duration)); } catch(e) { reject(e); }
     });
   });
 }
@@ -166,10 +148,10 @@ function runFFmpeg(ffmpeg, args) {
 function transcribeChunk(filePath, model, language, apiKey, timeOffset) {
   return new Promise((resolve, reject) => {
     const fileData = fs.readFileSync(filePath);
-    const boundary = '----TranskrypcjaBoundary' + Date.now();
+    const boundary = '----Boundary' + Date.now();
     const filename = path.basename(filePath);
 
-    let body = Buffer.concat([
+    const body = Buffer.concat([
       Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: audio/mpeg\r\n\r\n`),
       fileData,
       Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${model}`),
@@ -179,7 +161,7 @@ function transcribeChunk(filePath, model, language, apiKey, timeOffset) {
       Buffer.from(`\r\n--${boundary}--\r\n`),
     ]);
 
-    const options = {
+    const req = https.request({
       hostname: 'api.groq.com',
       path: '/openai/v1/audio/transcriptions',
       method: 'POST',
@@ -188,18 +170,14 @@ function transcribeChunk(filePath, model, language, apiKey, timeOffset) {
         'Content-Type': `multipart/form-data; boundary=${boundary}`,
         'Content-Length': body.length,
       }
-    };
-
-    const req = https.request(options, (res) => {
+    }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
           if (res.statusCode !== 200) return reject(new Error(json?.error?.message || `HTTP ${res.statusCode}`));
-          if (timeOffset > 0 && json.segments) {
-            json.segments.forEach(s => { s.start += timeOffset; s.end += timeOffset; });
-          }
+          if (timeOffset > 0 && json.segments) json.segments.forEach(s => { s.start += timeOffset; s.end += timeOffset; });
           resolve(json);
         } catch(e) { reject(e); }
       });
